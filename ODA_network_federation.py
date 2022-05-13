@@ -141,7 +141,7 @@ def reconstruct_bn(x_train, x_test, structure, outcome_node,select):
 
     return tuple((x_train_sub, x_test_sub)),tuple(new_structure_list)
 
-def remove_state(train, test):
+def remove_state(train, test,outcome_name):
     '''
     Removes any state that appears in the test set that was not in training set
 
@@ -155,7 +155,7 @@ def remove_state(train, test):
     rm_dict = {}
 
     for (col, val) in train.iteritems():
-        if col =='gleason_score':
+        if col ==outcome_name:
             continue
 
         remove = list(set(test[col])-set(val))
@@ -185,25 +185,54 @@ def keys_list(x):
 
     return keys_list
 
+def asymptotic_dist(ranked_genes):
+    '''
+    Creates an asympototic-like distribution of probabilities for ranked list of genes
+
+    INPUT
+    ranked_genes - list of ranked genes by importance
+    RETURN
+    dict_pnode - dictionary of ranked genes and their pNode
+    '''
+    starting_p = 0.95
+    dict_pnode = dict()
+    for i in range(len(ranked_genes)):
+        dict_pnode[ranked_genes[i]]=(starting_p - i*(1/(len(ranked_genes)*1.2)))
+        print((starting_p - i*(1/(len(ranked_genes)*1.2))))
+    return dict_pnode
+
+def unif_dist(ranked_genes):
+    '''
+    Creates a uniform distribution of probabilities for ranked list of genes
+
+    INPUT
+    ranked_genes - list of ranked genes by importance
+    RETURN
+    dict_pnode - dictionary of ranked genes and their pNode
+    '''
+    dict_pnode=dict()
+    for i in range(len(ranked_genes)):
+        dict_pnode[ranked_genes[i]]=0.5
+    return dict_pnode
+
 ### PERMUTATION WRAPPER ###
 # Wrapper function to run permutations
 
-def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20):
+def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20, outcome_node=0):
 
-    # Hardcode 0 as outcome node
-    outcome_node = 0
+    outcome_name = str(df.columns[0])
     scores, models = [],[]
 
     # Assume target column is first
-    X = df.iloc[:,1:]
-    y = df.iloc[:,1]
+    X = df.iloc[:,0:]
+    y = df.iloc[:,0]
 
     x_train, x_test, y_train, y_test = train_test_split(X.to_numpy(), y.to_numpy(), test_size=0.33, random_state=42)
     x_train = pd.DataFrame(x_train, columns = list(X.columns))
     x_test = pd.DataFrame(x_test, columns = list(X.columns))
 
 
-    selector = SelectKBest(chi2, k='all').fit(X.iloc[:,1:], X['gleason_score'])
+    selector = SelectKBest(chi2, k='all').fit(X.iloc[:,1:], X[outcome_name])
     x_rank = selector.scores_
     x_rank = np.nan_to_num(x_rank, nan=0.001)
     x_rank /= 1000
@@ -214,7 +243,7 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20):
 
         # selects features from ENTIRE dataset (before partition)
         select = feature_select(dict_pnode,n_min,n_max)
-        select.insert(0,'gleason_score')
+        select.insert(0,outcome_name)
 
         # Constraint graph
         rev_select = reverse(select)
@@ -229,8 +258,9 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20):
         new_df, new_struct = reconstruct_bn(x_train[select], x_test[select], model.structure,outcome_node,select)
         x_train_sub, x_test_sub = new_df[0], new_df[1]
 
-        y =  x_test_sub['gleason_score']
-        x_test_sub['gleason_score'] = None
+        ### Change hardcoded label name ###
+        y = np.array(x_test_sub[outcome_name])
+        x_test_sub[outcome_name] = None
 
         keys = keys_list(pd.concat([x_train_sub,x_test_sub]))
 
@@ -238,25 +268,27 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20):
 
         # END TEST ZONE #
 
-        # Change state names to gene symbols
-        mg = mygene.MyGeneInfo()
-        gene_sym = mg.querymany(list(x_train_sub.columns),scopes='ensembl.gene',fields='symbol',species='human')
+        # Change state names to gene symbols if ENSEMBL ID
+        if x_train_sub.columns[1][0:4] == "ENSG":
+            mg = mygene.MyGeneInfo()
+            gene_sym = mg.querymany(list(x_train_sub.columns)[1:],scopes='ensembl.gene',fields='symbol',species='human')
 
-        state_names = ['gleason_score']
-        for j in gene_sym:
-            for key in j:
-                if key == 'symbol':
-                    state_names.append(j.get(key))
+            state_names = [outcome_name]
+            for j in gene_sym:
+                for key in j:
+                    if key == 'symbol':
+                        state_names.append(j.get(key))
+        else:
+            state_names = list(x_train_sub.columns)
 
         print('Reconstructing model...2/2')
         re_model = pg.BayesianNetwork.from_structure(x_train_sub, new_struct, state_names=state_names, keys=keys)
         y_pred = np.array(re_model.predict(x_test_sub.to_numpy()))[:,0]
 
-
         ### Update scores ###
 
         # Keep record of last 5 scores
-        curr_score = roc_auc_score(y,y_pred)
+        curr_score = roc_auc_score(y,y_pred, multi_class='ovr')
         scores.append(curr_score)
         models.append(re_model)
 
@@ -265,13 +297,13 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20):
         # Update probability of choosing node by +/- 5%
         if len(scores) > 1 and scores[len(scores)-1] > scores[len(scores)-2]:
             for gene in select:
-                if gene == 'gleason_score':
+                if gene == outcome_name:
                     continue
                 dict_update = {gene:dict_pnode[gene] + 0.05}
                 dict_pnode.update(dict_update)
         elif len(scores) > 1 and scores[len(scores)-1] < scores[len(scores)-2]:
             for gene in select:
-                if gene == 'gleason_score':
+                if gene == outcome_name:
                     continue
                 dict_update = {gene:dict_pnode[gene] - 0.05}
                 dict_pnode.update(dict_update)
