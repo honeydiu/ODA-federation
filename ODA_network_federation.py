@@ -219,13 +219,12 @@ def unif_dist(ranked_genes):
 # Wrapper function to run permutations
 
 def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20, outcome_node=0):
-
-    outcome_name = str(df.columns[0])
     scores, models = [],[]
 
     # Assume target column is first
-    X = df.iloc[:,0:]
-    y = df.iloc[:,0]
+    X = df.iloc[:,1:]
+    y = df.iloc[:,1]
+    outcome_name = str(X.columns[0])
 
     x_train, x_test, y_train, y_test = train_test_split(X.to_numpy(), y.to_numpy(), test_size=0.33, random_state=42)
     x_train = pd.DataFrame(x_train, columns = list(X.columns))
@@ -233,21 +232,26 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20, outcome_node=0):
 
 
     selector = SelectKBest(chi2, k='all').fit(X.iloc[:,1:], X[outcome_name])
+    selector.feature_names_in_
+    dict_pnode =oda.unif_dist(oda.reverse(selector.feature_names_in_))
+
+    ### Deprecate this method of generating dictioanry of pNode ###
+    '''
     x_rank = selector.scores_
     x_rank = np.nan_to_num(x_rank, nan=0.001)
     x_rank /= 1000
-    selector.feature_names_in_
     dict_pnode = {selector.feature_names_in_[i]: x_rank[i] for i in range(len(x_rank))}
+    '''
 
     for i in range(max_iter):
 
         # selects features from ENTIRE dataset (before partition)
-        select = feature_select(dict_pnode,n_min,n_max)
+        select = oda.feature_select(dict_pnode,n_min,n_max)
         select.insert(0,outcome_name)
 
         # Constraint graph
-        rev_select = reverse(select)
-        constraints = gen_constraints(rev_select)
+        rev_select = oda.reverse(select)
+        constraints = oda.gen_constraints(rev_select)
 
         # Build BayesianNetwork with constraint graph
         print('Building model...')
@@ -255,21 +259,17 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20, outcome_node=0):
                                                 constraint_graph=constraints)
 
         print('Reconstructing model...1/2')
-        new_df, new_struct = reconstruct_bn(x_train[select], x_test[select], model.structure,outcome_node,select)
+        new_df, new_struct = oda.reconstruct_bn(x_train[select], x_test[select], model.structure,outcome_node,select)
         x_train_sub, x_test_sub = new_df[0], new_df[1]
 
         ### Change hardcoded label name ###
         y = np.array(x_test_sub[outcome_name])
         x_test_sub[outcome_name] = None
 
-        keys = keys_list(pd.concat([x_train_sub,x_test_sub]))
-
-        # TEST ZONE #
-
-        # END TEST ZONE #
+        keys = oda.keys_list(pd.concat([x_train_sub,x_test_sub]))
 
         # Change state names to gene symbols if ENSEMBL ID
-        if x_train_sub.columns[1][0:4] == "ENSG":
+        if x_train.columns[1][0:4] == "ENSG":
             mg = mygene.MyGeneInfo()
             gene_sym = mg.querymany(list(x_train_sub.columns)[1:],scopes='ensembl.gene',fields='symbol',species='human')
 
@@ -285,10 +285,11 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20, outcome_node=0):
         re_model = pg.BayesianNetwork.from_structure(x_train_sub, new_struct, state_names=state_names, keys=keys)
         y_pred = np.array(re_model.predict(x_test_sub.to_numpy()))[:,0]
 
+
         ### Update scores ###
 
         # Keep record of last 5 scores
-        curr_score = roc_auc_score(y,y_pred, multi_class='ovr')
+        curr_score = roc_auc_score(y,y_pred)
         scores.append(curr_score)
         models.append(re_model)
 
@@ -308,6 +309,41 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20, outcome_node=0):
                 dict_update = {gene:dict_pnode[gene] - 0.05}
                 dict_pnode.update(dict_update)
 
+        ### ASYNCHRONOUS PARALLEL UPDATING ###
+
+        # Convert dict_pnode into pandas df
+        dfpnode =  pd.DataFrame(dict_pnode,index=[0])
+
+        pW, pR = random.random(),random.random()
+
+        # Temp file automatically generates using original file name
+        # Warning: each parallel task file name should be unique
+        temp_path = str('OUT_'+path)
+
+        if pW < pWrite:
+            print('Writing to file 1...')
+            dfpnode.to_csv('temp/'+temp_path)
+
+        ### Hardcoded temp path name ODA/temp ###
+        if pR < pRead and len(os.listdir('temp'))>2:
+            print('Reading from file 2...')
+
+            # hidden filename
+            p = str('.DS_Store')
+
+            while p == str('.DS_Store'):
+                p = random.choice(os.listdir("temp"))
+                if p == temp_path:
+                    p = str('.DS_Store')
+
+            temp = pd.read_csv('temp/'+p).iloc[:,1:]
+            for gene in temp:
+                dfpnode[gene] = np.mean([float(dfpnode[gene]),float(temp[gene])])
+
+        # Convert dict_pnode back to dictionary
+        for col in dfpnode:
+            dict_pnode[col] = float(dfpnode[col])
+
         # Keep total scores list to 5 elements
         if len(scores) > 5:
             scores.pop(0)
@@ -325,4 +361,4 @@ def permute_bn(df,max_iter=1000,m=3,n_min=5,n_max=20, outcome_node=0):
 
     plt.figure(figsize=(14, 10))
     final_model.plot()
-    plt.show()
+    plt.savefig('MODEL_PLOT_'+path+'.png')
