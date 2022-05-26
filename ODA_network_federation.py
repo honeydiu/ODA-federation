@@ -136,7 +136,7 @@ def reconstruct_bn(x_train, x_test, structure, outcome_node,select):
                     node = reindex_dict.get(node)
                     new_edge.append(node)
                 else:
-                    new_edge = tuple()
+                    new_edge = []
             new_structure_list.append(tuple(new_edge))
 
     return tuple((x_train_sub, x_test_sub)),tuple(new_structure_list)
@@ -214,6 +214,33 @@ def unif_dist(ranked_genes):
     for i in range(len(ranked_genes)):
         dict_pnode[ranked_genes[i]]=0.5
     return dict_pnode
+
+def get_bn_auc_outcome_mod(model, df, y):
+    '''
+    Returns ROC-AUC score for multi-class targets
+
+    INPUT
+    model - Bayes model object
+    X - dataframe
+    y - target vector
+    RETURN
+    rocs - list of ROC scores
+    '''
+    n_unique_classes = len(set(y))
+    rocs = []
+
+    proba = model.predict_proba(X.to_numpy())
+    probs = []
+
+    for i in range(len(proba)):
+        probs_list=[]
+        for j in range(n_unique_classes):
+            probs_list.append(proba[i][0].parameters[0][j])
+        probs.append(probs_list)
+        probs_arr = np.array(probs)
+
+    rocs.append(roc_auc_score(y, probs_arr, multi_class='ovo'))
+    return rocs
 
 ### PERMUTATION WRAPPER ###
 # Wrapper function to run permutations
